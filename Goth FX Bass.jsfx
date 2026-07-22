@@ -1,0 +1,197 @@
+desc: Goth FX Bass
+
+slider1:1<0,1,0.01>Inharmonicity
+slider2:0.5<0,1,0.01>Brightness
+slider3:0<0,1,0.01>Tone
+slider4:0.4<0,1,0.1>Distortion
+slider5:0.011<0,1,0.001>Attack Time
+slider6:2<0,4,0.01>Volume
+
+in_pin:none
+out_pin:left output
+out_pin:right output
+
+@init
+
+NVOICES = 12;
+NPART   = 10;
+TOTAL   = NVOICES*NPART;
+
+freemem = 0;
+note     = freemem; freemem += NVOICES;
+vel      = freemem; freemem += NVOICES;
+age      = freemem; freemem += NVOICES;
+noiseamp = freemem; freemem += NVOICES;
+
+re    = freemem; freemem += TOTAL;
+im    = freemem; freemem += TOTAL;
+cosw  = freemem; freemem += TOTAL;
+sinw  = freemem; freemem += TOTAL;
+amp   = freemem; freemem += TOTAL;
+decy  = freemem; freemem += TOTAL;
+
+attack_env = freemem; freemem += NVOICES;
+attack_inc = freemem; freemem += NVOICES;
+
+voice_gain        = freemem; freemem += NVOICES; // smoothed 0..1 gain, handles retrigger clicks
+voice_gain_target = freemem; freemem += NVOICES;
+
+v = 0;
+while (v < NVOICES) (
+  note[v] = -1;
+  age[v] = 0;
+  noiseamp[v] = 0;
+  attack_env[v] = 1;
+  attack_inc[v] = 0;
+  voice_gain[v] = 0;
+  voice_gain_target[v] = 0;
+  v += 1;
+);
+
+i = 0;
+while (i < TOTAL) (
+  amp[i] = 0;
+  re[i] = 0;
+  im[i] = 0;
+  i += 1;
+);
+
+lpout = 0;
+noisedecay = exp(-1/(0.02*srate));
+slider4_smooth = slider4;
+
+// gain smoother coefficient - fast fade, ~5ms
+gain_coef = 1 - exp(-1/(0.005*srate));
+
+@block
+
+while (midirecv(offset, msg1, msg2, msg3)) (
+  status = msg1 & 0xf0;
+
+  (status == 0x90 && msg3 > 0) ? (
+    v = -1; i = 0;
+    while (i < NVOICES) (
+      (note[i] < 0 && v < 0) ? v = i;
+      i += 1;
+    );
+    v < 0 ? (
+      v = 0; oldest = age[0]; i = 1;
+      while (i < NVOICES) (
+        age[i] > oldest ? ( oldest = age[i]; v = i; );
+        i += 1;
+      );
+    );
+
+    // If voice currently has audible gain, fade it down instead of hard reset.
+    // We snap gain target to 0 momentarily then back to 1 isn't right either —
+    // instead: just let the gain smoother handle transition to new note's target of 1.
+    // But phase reset still requires zeroing amp smoothly:
+    voice_gain_target[v] = 1;
+
+    note[v] = msg2;
+    vel[v]  = msg3/127;
+    age[v]  = 0;
+    attack_env[v] = 0;
+    attack_inc[v] = 1 / (max(slider5, 0.003) * srate + 1);
+
+    f0 = 440 * pow(2, (msg2-69)/12);
+    binh = slider1*0.0009 * (1 + (msg2-60)/40);
+    binh < 0.00001 ? binh = 0.00001;
+    ampexp = 2.0 - slider2*1.3;
+    sustain = 5;
+
+    n = 1;
+    while (n <= NPART) (
+      idx = v*NPART + (n-1);
+      freq_n = f0 * n * sqrt(1 + binh*n*n);
+      freq_n < srate*0.45 ? (
+        w = 2*$pi*freq_n/srate;
+        cosw[idx] = cos(w);
+        sinw[idx] = sin(w);
+        re[idx] = 1;
+        im[idx] = 0;
+        amp[idx] = vel[v] / pow(n, ampexp);
+        sustain_n = sustain / sqrt(n);
+        decy[idx] = exp(-1/(sustain_n*srate));
+      ) : (
+        amp[idx] = 0;
+      );
+      n += 1;
+    );
+  ) : (
+    (status == 0x80 || (status == 0x90 && msg3 == 0)) ? (
+      i = 0;
+      while (i < NVOICES) (
+        note[i] == msg2 ? (
+          note[i] = -1;
+          voice_gain_target[i] = 0;
+        );
+        i += 1;
+      );
+    );
+  );
+);
+
+v = 0;
+while (v < NVOICES) (
+  note[v] >= 0 ? age[v] += 1;
+  v += 1;
+);
+
+@sample
+
+slider4_smooth += (slider4 - slider4_smooth) * 0.001;
+
+out = 0;
+v = 0;
+while (v < NVOICES) (
+
+  attack_env[v] < 1.0 ? (
+    attack_env[v] += attack_inc[v];
+    attack_env[v] > 1.0 ? attack_env[v] = 1.0;
+  );
+
+  // Smooth per-voice gain toward target (declicks retrigger and note-off)
+  voice_gain[v] += (voice_gain_target[v] - voice_gain[v]) * gain_coef;
+
+  vout = 0;
+  n = 0;
+  while (n < NPART) (
+    idx = v*NPART + n;
+    a = amp[idx] * attack_env[v];
+
+    a > 0.00001 ? (
+      r = re[idx]; m = im[idx];
+      nr = r*cosw[idx] - m*sinw[idx];
+      nm = r*sinw[idx] + m*cosw[idx];
+      re[idx] = nr;
+      im[idx] = nm;
+      vout += nm * a;
+      amp[idx] = amp[idx] * decy[idx];
+    );
+    n += 1;
+  );
+
+  vout += (rand(2)-1) * noiseamp[v];
+
+  // Apply smoothed voice gain to whole voice output (declick)
+  vout *= voice_gain[v];
+
+  // Distort through a tan
+  x2 = vout*slider4_smooth;
+  x4 = x2*x2;
+  vout = vout * (1 - x2/3 + 2*x4/15);
+
+  noiseamp[v] *= noisedecay;
+  out += vout;
+  v += 1;
+);
+
+outval1 = 0;
+tone = 0.05 + slider3*0.45;
+lpout = lpout + tone*(out - lpout);
+
+outval = lpout * 1 * 0.5 * slider6;
+
+spl0 = outval;
+spl1 = outval;

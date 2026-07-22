@@ -1,0 +1,311 @@
+//Character Stereo Field with Low-Pass Filter and Reverb
+
+slider1:100<0,200,1>Width (%)
+slider2:120<20,500,1>Bass Safety Freq (Hz)
+slider3:0<0,1,1{Off,On}>Mono-Safe Bass
+slider4:1<0,1,1{Off,On}>Haas Mode
+slider5:36<0,100,0.1>Haas Delay (ms)
+slider6:0<0,1,1{Off,On}>Physical character modeling
+slider7:10000<20,20000,1>Low Pass Cutoff (Hz)
+slider8:0<0,1,0.01>Reverb Dry to Wet Mix
+slider9:2.0<0.1,10,0.1>Reverb Decay Time (s)
+slider10:0.7<0,1,0.01>Reverb Damping
+slider11:0.5<0,1,0.01>Reverb Size
+
+@init
+// Haas delay buffer
+maxdelay_ms = 100;
+buf_size = srate * (maxdelay_ms/1000) + 4;
+buf0 = 0;
+buf1 = buf_size;
+memset(buf0, 0, buf_size);
+memset(buf1, 0, buf_size);
+wpos = 0;
+
+// one-pole lowpass states
+lp0 = 0;  // for bass split
+lp1 = 0;
+lp2 = 0;  // for low pass filter
+lp3 = 0;
+
+// Reverb FDN parameters
+max_reverb_delay = 0.5; // max 500ms delay
+reverb_buf_size = srate * max_reverb_delay + 4;
+rev0 = reverb_buf_size;
+rev1 = rev0 + reverb_buf_size;
+rev2 = rev1 + reverb_buf_size;
+rev3 = rev2 + reverb_buf_size;
+memset(rev0, 0, reverb_buf_size*4);
+rev_wpos = 0;
+
+// Reverb state variables
+rev_lp0 = 0;
+rev_lp1 = 0;
+rev_lp2 = 0;
+rev_lp3 = 0;
+
+// Reverb base delays (initialize properly for JSFX)
+base_delays0 = 31;
+base_delays1 = 47;
+base_delays2 = 67;
+base_delays3 = 97;
+
+// Reverb coefficients
+rev_decay = 0.5;
+rev_damping = 0.5;
+rev_size = 0.5;
+
+// Correlation running sums
+corr_sum_lr = 0;
+corr_sum_sq0 = 0;
+corr_sum_sq1 = 0;
+
+@slider
+width = slider1/100;
+haas_on = slider4;
+physical_mod_on = slider6;
+mono_bass_on = slider3;
+delay_samples = (slider5/1000) * srate;
+delay_samples > buf_size-2 ? delay_samples = buf_size-2;
+
+freq = slider2;
+x = exp(-2*$pi*freq/srate);
+lp_coef = x;
+
+cutoff_lp = slider7;
+x_lp = exp(-2*$pi*cutoff_lp/srate);
+lp_coef_lp = x_lp;
+
+// Reverb parameters
+rev_mix = slider8;
+rev_decay = slider9;
+rev_damping = slider10;
+rev_size = slider11;
+
+// Calculate reverb coefficients based on parameters
+// Base delay times (ms) - now using individual variables
+base_delays0 = base_delays0 * rev_size;
+base_delays1 = base_delays1 * rev_size;
+base_delays2 = base_delays2 * rev_size;
+base_delays3 = base_delays3 * rev_size;
+
+// Calculate decay coefficients
+rev_feedback = pow(10.0, -3.0 * rev_decay / rev_size);
+
+// Damping coefficients
+damping_coef = exp(-2.0 * $pi * 5000.0 / srate);
+damping_coef = pow(damping_coef, rev_damping);
+
+// Update delay buffer sizes based on size parameter
+reverb_buf_size = srate * (max_reverb_delay * rev_size) + 4;
+rev_wpos = rev_wpos % reverb_buf_size;
+
+@sample
+// Haas delay pass
+haas_on == 1 ? (
+  buf0[wpos] = spl0;
+  buf1[wpos] = spl1;
+
+  rpos = wpos - delay_samples;
+  rpos < 0 ? rpos += buf_size;
+
+  delayed_r = buf1[rpos];
+  spl1 = delayed_r;
+
+  wpos += 1;
+  wpos >= buf_size ? wpos = 0;
+
+  physical_mod_on == 1 ? (
+    buf0[wpos] = spl0 / 1;
+    buf1[wpos] = spl1 / 2;
+
+    rpos = wpos - delay_samples;
+    rpos < 0 ? rpos += buf_size;
+
+    delayed_r = buf1[rpos];
+    spl1 = delayed_r;
+
+    wpos += 1;
+    wpos >= buf_size ? wpos = 0;
+  );
+);
+
+// Apply low pass filter first
+lp2 = lp2*lp_coef_lp + spl0*(1-lp_coef_lp);
+lp3 = lp3*lp_coef_lp + spl1*(1-lp_coef_lp);
+spl0 = lp2;
+spl1 = lp3;
+
+// Mid-side stereo widening
+mid = (spl0 + spl1) * 0.5;
+side = (spl0 - spl1) * 0.5;
+side *= width;
+spl0 = mid + side;
+spl1 = mid - side;
+
+mono_bass_on == 1 ? (
+  lp0 = lp0*lp_coef + mid*(1-lp_coef);
+  low_side = side*(1-lp_coef);
+  spl0 -= low_side*0.5;
+  spl1 += low_side*0.5;
+);
+
+// REVERB
+rev_in0 = spl0;
+rev_in1 = spl1;
+
+// Calculate 4 delay times based on size parameter
+del0 = (base_delays0) / 1000.0 * srate;
+del1 = (base_delays1) / 1000.0 * srate;
+del2 = (base_delays2) / 1000.0 * srate;
+del3 = (base_delays3) / 1000.0 * srate;
+
+// Read from delay lines
+rpos0 = rev_wpos - del0;
+rpos0 < 0 ? rpos0 += reverb_buf_size;
+rpos1 = rev_wpos - del1;
+rpos1 < 0 ? rpos1 += reverb_buf_size;
+rpos2 = rev_wpos - del2;
+rpos2 < 0 ? rpos2 += reverb_buf_size;
+rpos3 = rev_wpos - del3;
+rpos3 < 0 ? rpos3 += reverb_buf_size;
+
+rev_out0 = rev0[rpos0];
+rev_out1 = rev1[rpos1];
+rev_out2 = rev2[rpos2];
+rev_out3 = rev3[rpos3];
+
+// Apply damping to feedback signals with smoother transition
+// Use a more musical damping curve (10kHz at 0 damping, 5kHz at 1 damping)
+damping_freq = 10000.0 * pow(0.5, rev_damping * 2.0);
+damping_coef = exp(-2.0 * $pi * damping_freq / srate);
+rev_out0 = rev_out0 * damping_coef + rev_lp0 * (1 - damping_coef);
+rev_out1 = rev_out1 * damping_coef + rev_lp1 * (1 - damping_coef);
+rev_out2 = rev_out2 * damping_coef + rev_lp2 * (1 - damping_coef);
+rev_out3 = rev_out3 * damping_coef + rev_lp3 * (1 - damping_coef);
+
+// Store for next cycle
+rev_lp0 = rev_out0;
+rev_lp1 = rev_out1;
+rev_lp2 = rev_out2;
+rev_lp3 = rev_out3;
+
+// Calculate feedback with smoother decay curve
+// This creates a more natural exponential decay
+rev_feedback = pow(0.5, 1.0 / (rev_decay * rev_size * 2.0 + 0.1));
+
+// Calculate feedback (FDN matrix) with input diffusion
+new0 = rev_out0 * rev_feedback;
+new1 = rev_out1 * rev_feedback;
+new2 = rev_out2 * rev_feedback;
+new3 = rev_out3 * rev_feedback;
+
+// Add some input diffusion (smoother transitions between taps)
+input_diffusion = 0.2;
+new0 = new0 * (1 - input_diffusion) + new1 * input_diffusion * 0.3;
+new1 = new1 * (1 - input_diffusion) + new2 * input_diffusion * 0.3;
+new2 = new2 * (1 - input_diffusion) + new3 * input_diffusion * 0.3;
+new3 = new3 * (1 - input_diffusion) + new0 * input_diffusion * 0.3;
+
+// Write to delay lines with input mixing
+rev0[rev_wpos] = new0 * 0.7 + rev_in0 * 0.3;
+rev1[rev_wpos] = new1 * 0.7 + rev_in1 * 0.3;
+rev2[rev_wpos] = new2 * 0.7 + rev_in0 * 0.3;
+rev3[rev_wpos] = new3 * 0.7 + rev_in1 * 0.3;
+
+rev_wpos += 1;
+rev_wpos >= reverb_buf_size ? rev_wpos = 0;
+
+// Mix reverb with dry signal
+wet0 = (rev_out0 + rev_out2) * 0.5;
+wet1 = (rev_out1 + rev_out3) * 0.5;
+
+spl0 = spl0 * (1 - rev_mix) + wet0 * rev_mix;
+spl1 = spl1 * (1 - rev_mix) + wet1 * rev_mix;
+
+// Correlation running sums
+corr_sum_lr += spl0*spl1;
+corr_sum_sq0 += spl0*spl0;
+corr_sum_sq1 += spl1*spl1;
+
+@gfx 500 200
+
+cx = 290;   
+planet_y = 100; 
+planet_r = 42;  
+ring_steps = 128;
+
+width_norm = slider1 / 200.0;
+ring_scale = 0.28 + width_norm * 1.62;
+
+width_norm < 0.5 ? (
+  t = width_norm * 2.0;
+  r_ring1 = 0.5 + 0.45*t;
+  g_ring1 = 0.45 + 0.15*t;
+  b_ring1 = 0.85 - 0.05*t;
+  r_ring2 = 0.2  + 0.4*t;
+  g_ring2 = 0.4  + 0.2*t;
+  b_ring2 = 0.8  + 0.0*t;
+) : (
+  t = (width_norm - 0.5) * 2.0;
+  r_ring1 = 0.7  + 0.3*t;
+  g_ring1 = 0.6  - 0.3*t;
+  b_ring1 = 0.8  - 0.7*t;
+  r_ring2 = 0.6  + 0.35*t;
+  g_ring2 = 0.6  - 0.5*t;
+  b_ring2 = 0.8  - 0.7*t;
+);
+// ring alpha (outer ring slightly more transparent)
+alpha_ring1 = 0.7;
+alpha_ring2 = 0.5;
+
+// --- Draw outer ring (behind planet) ---
+rx_outer1 = ring_scale * 88;
+ry_outer1 = ring_scale * 28;
+prev_x = cx + rx_outer1 * cos(0);
+prev_y = planet_y + ry_outer1 * sin(0);
+step = 2.0 * $pi / ring_steps;
+i = step;
+
+loop(ring_steps,
+  px = cx + rx_outer1 * cos(i);
+  py = planet_y + ry_outer1 * sin(i);
+  gfx_r = r_ring1; gfx_g = g_ring1; gfx_b = b_ring1;
+  gfx_a = alpha_ring1;
+  gfx_line(prev_x, prev_y, px, py, 1);
+  prev_x = px;
+  prev_y = py;
+  i += step;
+);
+
+gfx_r = r_ring1; gfx_g = g_ring1; gfx_b = b_ring1;
+gfx_a = alpha_ring1;
+gfx_line(prev_x, prev_y, cx + rx_outer1 * cos(0), planet_y + ry_outer1 * sin(0), 1);
+
+rx_inner1 = ring_scale * 68;
+ry_inner1 = ring_scale * 22;
+prev_x = cx + rx_inner1 * cos(0);
+prev_y = planet_y + ry_inner1 * sin(0);
+i = step;
+loop(ring_steps,
+  px = cx + rx_inner1 * cos(i);
+  py = planet_y + ry_inner1 * sin(i);
+  gfx_r = r_ring2; gfx_g = g_ring2; gfx_b = b_ring2;
+  gfx_a = alpha_ring2;
+  gfx_line(prev_x, prev_y, px, py, 1);
+  prev_x = px;
+  prev_y = py;
+  i += step;
+);
+
+gfx_r = r_ring2; gfx_g = g_ring2; gfx_b = b_ring2;
+gfx_a = alpha_ring2;
+gfx_line(prev_x, prev_y, cx + rx_inner1 * cos(0), planet_y + ry_inner1 * sin(0), 1);
+
+// --- Draw planet 
+gfx_r = 0.80; gfx_g = 0.80; gfx_b = 0.90;
+gfx_a = 1.0;
+gfx_circle(cx, planet_y, planet_r, 1, 0);
+
+gfx_r = 0.38; gfx_g = 0.40; gfx_b = 0.44; gfx_a = 1.0;
+gfx_x = 200; gfx_y = 20; gfx_drawstr("CHARACTER STEREO FIELD");
