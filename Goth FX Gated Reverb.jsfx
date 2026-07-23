@@ -1,0 +1,240 @@
+desc:Hard Gated Reverb
+
+slider1:thresh_db=-30<-60,0,1>Gate Threshold (dB)
+slider2:hold_ms=150<0,2000,1>Hold Time (ms)
+slider3:release_ms=15<1,300,1>Gate Release (ms)
+slider4:predelay_ms=0<0,150,1>Predelay (ms)
+slider5:decay=0.5<0,1,0.001>Reverb Decay
+slider6:damp=0.3<0,1,0.001>Damping
+slider7:size=1<0.5,2,0.01>Room Size
+slider8:mix=100<0,100,1>Wet Mix (%)
+slider9:gate_on=1<0,1,1{Off,On}>Gate
+
+@init
+
+function comb(bufptr, buflen, statebase, fb, dmp, input)
+  local(idx, stored, damped)
+(
+  idx = statebase[0];
+  idx >= buflen ? idx = 0;
+  stored = bufptr[idx];
+  damped = stored*(1-dmp) + statebase[1]*dmp;
+  statebase[1] = damped;
+  bufptr[idx] = input + damped*fb;
+  idx += 1;
+  idx >= buflen ? idx = 0;
+  statebase[0] = idx;
+  stored;
+);
+
+function allpass(bufptr, buflen, statebase, fb, input)
+  local(idx, bufout, output)
+(
+  idx = statebase[0];
+  idx >= buflen ? idx = 0;
+  bufout = bufptr[idx];
+  output = bufout - input;
+  bufptr[idx] = input + bufout*fb;
+  idx += 1;
+  idx >= buflen ? idx = 0;
+  statebase[0] = idx;
+  output;
+);
+
+sr_scale = srate/44100;
+max_size = 2.0;
+spread   = 23;
+
+ct0 = 1557; ct1 = 1617; ct2 = 1491; ct3 = 1422;
+at0 = 556;  at1 = 441;
+
+max_predelay_ms = 150;
+pd_max_samples  = ceil(max_predelay_ms/1000*srate) + 4;
+
+pd_bufL = 0;
+pd_bufR = pd_bufL + pd_max_samples;
+
+comb0L       = pd_bufR + pd_max_samples;
+comb0L_cap   = ceil(ct0*sr_scale*max_size) + spread*2 + 8;
+comb0L_state = comb0L + comb0L_cap;
+
+comb0R       = comb0L_state + 2;
+comb0R_cap   = comb0L_cap;
+comb0R_state = comb0R + comb0R_cap;
+
+comb1L       = comb0R_state + 2;
+comb1L_cap   = ceil(ct1*sr_scale*max_size) + spread*2 + 8;
+comb1L_state = comb1L + comb1L_cap;
+
+comb1R       = comb1L_state + 2;
+comb1R_cap   = comb1L_cap;
+comb1R_state = comb1R + comb1R_cap;
+
+comb2L       = comb1R_state + 2;
+comb2L_cap   = ceil(ct2*sr_scale*max_size) + spread*2 + 8;
+comb2L_state = comb2L + comb2L_cap;
+
+comb2R       = comb2L_state + 2;
+comb2R_cap   = comb2L_cap;
+comb2R_state = comb2R + comb2R_cap;
+
+comb3L       = comb2R_state + 2;
+comb3L_cap   = ceil(ct3*sr_scale*max_size) + spread*2 + 8;
+comb3L_state = comb3L + comb3L_cap;
+
+comb3R       = comb3L_state + 2;
+comb3R_cap   = comb3L_cap;
+comb3R_state = comb3R + comb3R_cap;
+
+ap0L       = comb3R_state + 2;
+ap0L_cap   = ceil(at0*sr_scale*max_size) + spread*2 + 8;
+ap0L_state = ap0L + ap0L_cap;
+
+ap0R       = ap0L_state + 1;
+ap0R_cap   = ap0L_cap;
+ap0R_state = ap0R + ap0R_cap;
+
+ap1L       = ap0R_state + 1;
+ap1L_cap   = ceil(at1*sr_scale*max_size) + spread*2 + 8;
+ap1L_state = ap1L + ap1L_cap;
+
+ap1R       = ap1L_state + 1;
+ap1R_cap   = ap1L_cap;
+ap1R_state = ap1R + ap1R_cap;
+
+pd_pos       = 0;
+gate_gain    = 0;
+env          = 0;
+hold_counter = 0;
+
+det_coef = exp(-1/(0.003*srate));
+
+@slider
+
+hold_samples    = max(0, floor(hold_ms/1000*srate));
+release_samples = max(1, floor(release_ms/1000*srate));
+attack_samples  = max(1, floor(0.001*srate));
+
+release_coef = exp(-1/release_samples);
+attack_coef  = exp(-1/attack_samples);
+
+predelay_samples = min(pd_max_samples-2, floor(predelay_ms/1000*srate));
+
+fb  = 0.7 + decay*0.28;
+dmp = damp*0.9;
+
+comb0_len = min(comb0L_cap-1, max(4, floor(ct0*sr_scale*size)));
+comb1_len = min(comb1L_cap-1, max(4, floor(ct1*sr_scale*size)));
+comb2_len = min(comb2L_cap-1, max(4, floor(ct2*sr_scale*size)));
+comb3_len = min(comb3L_cap-1, max(4, floor(ct3*sr_scale*size)));
+
+ap0_len = min(ap0L_cap-1, max(4, floor(at0*sr_scale*size)));
+ap1_len = min(ap1L_cap-1, max(4, floor(at1*sr_scale*size)));
+
+spr = floor(spread*sr_scale);
+
+comb0R_len = min(comb0R_cap-1, comb0_len + spr);
+comb1R_len = min(comb1R_cap-1, comb1_len + spr);
+comb2R_len = min(comb2R_cap-1, comb2_len + spr);
+comb3R_len = min(comb3R_cap-1, comb3_len + spr);
+
+ap0R_len = min(ap0R_cap-1, ap0_len + spr);
+ap1R_len = min(ap1R_cap-1, ap1_len + spr);
+
+wet = mix/100;
+dry = 1 - wet;
+
+@sample
+
+dryL = spl0;
+dryR = spl1;
+
+inpk = max(abs(dryL), abs(dryR));
+inpk > env ? env = inpk : env = env*det_coef + inpk*(1-det_coef);
+
+env_db = 20*log10(env + 0.0000001);
+
+env_db > thresh_db ? (
+  hold_counter = hold_samples;
+  gate_target = 1;
+) : (
+  hold_counter > 0 ? (
+    hold_counter -= 1;
+    gate_target = 1;
+  ) : (
+    gate_target = 0;
+  );
+);
+
+gate_target > gate_gain ? (
+  gate_gain = gate_target + (gate_gain-gate_target)*attack_coef;
+) : (
+  gate_gain = gate_target + (gate_gain-gate_target)*release_coef;
+);
+
+gate_on < 0.5 ? gate_gain = 1;
+
+pd_bufL[pd_pos] = dryL;
+pd_bufR[pd_pos] = dryR;
+
+rd_pos = pd_pos - predelay_samples;
+rd_pos < 0 ? rd_pos += pd_max_samples;
+
+pdL = pd_bufL[rd_pos];
+pdR = pd_bufR[rd_pos];
+
+pd_pos += 1;
+pd_pos >= pd_max_samples ? pd_pos = 0;
+
+inmono = (pdL+pdR)*0.5;
+
+c0L = comb(comb0L, comb0_len, comb0L_state, fb, dmp, inmono);
+c1L = comb(comb1L, comb1_len, comb1L_state, fb, dmp, inmono);
+c2L = comb(comb2L, comb2_len, comb2L_state, fb, dmp, inmono);
+c3L = comb(comb3L, comb3_len, comb3L_state, fb, dmp, inmono);
+sumL = (c0L+c1L+c2L+c3L)*0.25;
+
+c0R = comb(comb0R, comb0R_len, comb0R_state, fb, dmp, inmono);
+c1R = comb(comb1R, comb1R_len, comb1R_state, fb, dmp, inmono);
+c2R = comb(comb2R, comb2R_len, comb2R_state, fb, dmp, inmono);
+c3R = comb(comb3R, comb3R_len, comb3R_state, fb, dmp, inmono);
+sumR = (c0R+c1R+c2R+c3R)*0.25;
+
+wetL = allpass(ap0L, ap0_len, ap0L_state, 0.5, sumL);
+wetL = allpass(ap1L, ap1_len, ap1L_state, 0.5, wetL);
+
+wetR = allpass(ap0R, ap0R_len, ap0R_state, 0.5, sumR);
+wetR = allpass(ap1R, ap1R_len, ap1R_state, 0.5, wetR);
+
+wetL *= gate_gain;
+wetR *= gate_gain;
+
+spl0 = dryL*dry + wetL*wet;
+spl1 = dryR*dry + wetR*wet;
+
+@gfx 300 80
+
+gfx_r=0.1; gfx_g=0.1; gfx_b=0.1;
+gfx_rect(0,0,gfx_w,gfx_h);
+
+gfx_r=1; gfx_g=1; gfx_b=1;
+gfx_x=8; gfx_y=8;
+gfx_drawstr("Hard Gated Reverb");
+
+barw = (gfx_w-16)*gate_gain;
+gate_on < 0.5 ? (
+  gfx_r=0.4; gfx_g=0.4; gfx_b=0.4;
+) : (
+  gate_gain > 0.5 ? ( gfx_r=0.2; gfx_g=0.9; gfx_b=0.3; ) : ( gfx_r=0.9; gfx_g=0.2; gfx_b=0.2; );
+);
+gfx_rect(8, 30, barw, 20);
+
+gfx_r=0.6; gfx_g=0.6; gfx_b=0.6;
+gfx_x=8; gfx_y=55;
+gfx_drawstr("Gate:");
+gfx_x=48; gfx_y=55;
+gate_on < 0.5 ? (
+  gfx_drawstr("bypassed");
+) : (
+  gate_gain > 0.5 ? gfx_drawstr("open") : gfx_drawstr("closed");
+);
