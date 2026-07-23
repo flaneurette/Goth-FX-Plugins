@@ -1,0 +1,255 @@
+desc:Goth FX Synth Piano 
+
+slider1:0.4<0,1,0.01>Inharmonicity
+slider2:0.5<0,1,0.01>Brightness
+slider3:3.0<0.2,8,0.1>Sustain (seconds)
+slider4:0.4<0,1,0.01>Hammer noise amount
+slider5:0.6<0,1,0.01>Tone (output lowpass)
+slider6:0.5<0,1,0.01>Volume
+slider7:0.12<0.05,0.5,0.01>Strike Position
+slider8:0.3<0,1,0.01>Unison Detune
+slider9:0.35<0,1,0.01>Soundboard Resonance
+
+in_pin:none
+out_pin:left output
+out_pin:right output
+
+@init
+
+NVOICES  = 6;
+NSTRINGS = 2;
+NPART    = 8;
+TOTAL    = NVOICES*NSTRINGS*NPART;
+
+// per-voice state
+freemem = 0;
+note     = freemem; freemem += NVOICES;
+vel      = freemem; freemem += NVOICES;
+age      = freemem; freemem += NVOICES;
+keyheld  = freemem; freemem += NVOICES;
+noiseamp = freemem; freemem += NVOICES;
+
+// per-partial state, indexed as (v*NSTRINGS+s)*NPART + n
+re   = freemem; freemem += TOTAL;
+im   = freemem; freemem += TOTAL;
+cosw = freemem; freemem += TOTAL;
+sinw = freemem; freemem += TOTAL;
+af   = freemem; freemem += TOTAL; // fast envelope
+asl  = freemem; freemem += TOTAL; // slow (singing) envelope
+decf = freemem; freemem += TOTAL;
+decs = freemem; freemem += TOTAL;
+
+v = 0;
+while (v < NVOICES) (
+  note[v] = -1;
+  keyheld[v] = 0;
+  age[v] = 0;
+  noiseamp[v] = 0;
+  v += 1;
+);
+
+i = 0;
+while (i < TOTAL) (
+  af[i] = 0;
+  asl[i] = 0;
+  re[i] = 0;
+  im[i] = 0;
+  i += 1;
+);
+
+lpout = 0;
+pedal = 0;
+noisedecay = exp(-1/(0.02*srate));  // ~20ms hammer transient
+dampFast   = exp(-1/(0.12*srate));  // ~120ms damper fall
+
+// soundboard resonators (fixed low body frequencies)
+f1 = 2*sin($pi*95/srate);   q1 = 0.25; low1 = 0; band1 = 0;
+f2 = 2*sin($pi*185/srate);  q2 = 0.22; low2 = 0; band2 = 0;
+f3 = 2*sin($pi*420/srate);  q3 = 0.20; low3 = 0; band3 = 0;
+
+@block
+
+while (midirecv(offset, msg1, msg2, msg3)) (
+  status = msg1 & 0xf0;
+
+  status == 0x90 && msg3 > 0 ? (
+    // --- note on: prefer a free (key-released) voice, else steal oldest ---
+    v = -1; i = 0;
+    while (i < NVOICES) (
+      (keyheld[i] == 0 && v < 0) ? v = i;
+      i += 1;
+    );
+    v < 0 ? (
+      v = 0; oldest = age[0]; i = 1;
+      while (i < NVOICES) (
+        age[i] > oldest ? ( oldest = age[i]; v = i; );
+        i += 1;
+      );
+    );
+
+    note[v] = msg2;
+    vel[v]  = msg3/127;
+    age[v]  = 0;
+    keyheld[v] = 1;
+    noiseamp[v] = vel[v] * slider4 * (0.6 + 0.8*vel[v]);
+
+    f0 = 440 * pow(2, (msg2-69)/12);
+
+    binh = slider1*0.0009 * (1 + (msg2-60)/40);
+    binh < 0.00001 ? binh = 0.00001;
+
+    ampexp = (2.0 - slider2*1.3) - vel[v]*0.4; // harder hit -> brighter
+    ampexp < 0.3 ? ampexp = 0.3;
+
+    tau0 = slider3;
+    strikepos = slider7;
+    detune_amt = slider8*0.006;
+
+    s = 0;
+    while (s < NSTRINGS) (
+      detune = (s == 0) ? (1 - detune_amt*0.5) : (1 + detune_amt*0.5);
+      n = 1;
+      while (n <= NPART) (
+        idx = (v*NSTRINGS+s)*NPART + (n-1);
+        freq_n = f0 * detune * n * sqrt(1 + binh*n*n);
+
+        freq_n < srate*0.45 ? (
+          w = 2*$pi*freq_n/srate;
+          cosw[idx] = cos(w);
+          sinw[idx] = sin(w);
+          re[idx] = 1;
+          im[idx] = 0;
+
+          comb = abs(sin(n*$pi*strikepos));
+          comb < 0.05 ? comb = 0.05;
+
+          baseamp = (vel[v] / pow(n, ampexp)) * comb;
+          af[idx]  = baseamp * 0.6;
+          asl[idx] = baseamp * 0.4;
+
+          tau_fast = 0.08 + 0.05*(1/sqrt(n));
+          tau_slow = tau0 / sqrt(n);
+
+          decf[idx] = exp(-1/(tau_fast*srate));
+          decs[idx] = exp(-1/(tau_slow*srate));
+        ) : (
+          af[idx] = 0;
+          asl[idx] = 0;
+        );
+        n += 1;
+      );
+      s += 1;
+    );
+  ) : (
+    status == 0x80 || (status == 0x90 && msg3 == 0) ? (
+      // --- note off ---
+      i = 0;
+      while (i < NVOICES) (
+        note[i] == msg2 ? (
+          keyheld[i] = 0;
+          pedal == 0 ? (
+            s = 0;
+            while (s < NSTRINGS) (
+              n = 0;
+              while (n < NPART) (
+                idx = (i*NSTRINGS+s)*NPART + n;
+                decf[idx] = dampFast;
+                decs[idx] = dampFast;
+                n += 1;
+              );
+              s += 1;
+            );
+          );
+        );
+        i += 1;
+      );
+    ) : (
+      status == 0xB0 && msg2 == 64 ? (
+        // --- sustain pedal ---
+        msg3 >= 64 ? (
+          pedal = 1;
+        ) : (
+          pedal = 0;
+          v = 0;
+          while (v < NVOICES) (
+            keyheld[v] == 0 ? (
+              s = 0;
+              while (s < NSTRINGS) (
+                n = 0;
+                while (n < NPART) (
+                  idx = (v*NSTRINGS+s)*NPART + n;
+                  decf[idx] = dampFast;
+                  decs[idx] = dampFast;
+                  n += 1;
+                );
+                s += 1;
+              );
+              v += 1;
+            ) : ( v += 1; );
+          );
+        );
+      );
+    );
+  );
+);
+
+v = 0;
+while (v < NVOICES) (
+  keyheld[v] == 1 ? age[v] += 1;
+  v += 1;
+);
+
+@sample
+
+out = 0;
+v = 0;
+while (v < NVOICES) (
+  vout = 0;
+  s = 0;
+  while (s < NSTRINGS) (
+    n = 0;
+    while (n < NPART) (
+      idx = (v*NSTRINGS+s)*NPART + n;
+      a = af[idx] + asl[idx];
+      a > 0.00001 ? (
+        r = re[idx]; m = im[idx];
+        nr = r*cosw[idx] - m*sinw[idx];
+        nm = r*sinw[idx] + m*cosw[idx];
+        re[idx] = nr;
+        im[idx] = nm;
+        vout += nm * a;
+        af[idx]  = af[idx]  * decf[idx];
+        asl[idx] = asl[idx] * decs[idx];
+      );
+      n += 1;
+    );
+    s += 1;
+  );
+  vout += (rand(2)-1) * noiseamp[v];
+  noiseamp[v] *= noisedecay;
+  out += vout;
+  v += 1;
+);
+
+tone = 0.05 + slider5*0.45;
+lpout = lpout + tone*(out - lpout);
+
+low1 = low1 + f1*band1;
+high1 = lpout - low1 - q1*band1;
+band1 = f1*high1 + band1;
+
+low2 = low2 + f2*band2;
+high2 = lpout - low2 - q2*band2;
+band2 = f2*high2 + band2;
+
+low3 = low3 + f3*band3;
+high3 = lpout - low3 - q3*band3;
+band3 = f3*high3 + band3;
+
+resonance = (band1 + band2 + band3) * slider9 * 0.3;
+
+final = lpout + resonance;
+outval = final * slider6 * 0.5;
+
+spl0 = outval;
+spl1 = outval;
