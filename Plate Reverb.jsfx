@@ -1,0 +1,264 @@
+desc:Plate Reverb (Dattorro-style)
+// A lush plate reverb built on the classic Dattorro (1997) "figure-8" tank
+// topology: bandwidth-limited mono input -> 4-stage allpass diffuser ->
+// two cross-feeding decay loops (modulated allpass -> long delay -> damping
+// LPF -> decay gain -> allpass -> long delay), each loop feeding the other.
+// Output is tapped from both loops and blended for a wide, decorrelated
+// stereo tail. Buffer lengths scale with sample rate and the Size control.
+//
+// Controls:
+//   Predelay   - gap before the reverb starts (ms)
+//   Size       - scales all tank delay lengths (room/plate size)
+//   Decay      - tail length / feedback amount
+//   Damping    - high-frequency loss per loop (darker tail at higher values)
+//   Diffusion  - density/smoothness of the diffuser network
+//   Mod Rate/Depth - subtle pitch modulation in the tank, kills metallic ring
+//   Low Cut    - removes rumble/mud from what enters the tank
+//   High Cut   - tames brightness of the wet output
+//   Width      - stereo width of the wet signal
+//   Mix        - dry/wet balance
+//   Output Gain- trim in dB
+
+slider1:predelay_ms=20<0,250,1>Predelay (ms)
+slider2:size=1<0.5,1.5,0.01>Size
+slider3:decay=0.8<0,0.999,0.001>Decay
+slider4:damping=0.4<0,1,0.01>Damping
+slider5:diffusion=0.75<0,1,0.01>Diffusion
+slider6:mod_rate=0.6<0.05,5,0.01>Mod Rate (Hz)
+slider7:mod_depth=0.3<0,1,0.01>Mod Depth
+slider8:lowcut_hz=100<20,1000,1>Low Cut (Hz)
+slider9:highcut_hz=9000<1000,20000,10>High Cut (Hz)
+slider10:width=100<0,200,1>Width (%)
+slider11:mix=35<0,100,1>Mix (%)
+slider12:gain_db=0<-24,24,0.1>Output Gain (dB)
+
+@init
+
+// ---- Allocate delay-line memory ----
+// Capacities are computed at the maximum possible Size (1.5) and a guard
+// margin so runtime length changes (via the Size slider) always stay safely
+// inside the allocated region. The two "modulated" allpasses get extra
+// headroom for their pitch-modulated fractional read tap.
+
+GUARD = 32;
+scale_max = (srate/29761)*1.5;
+
+predelay_cap = ceil(0.25*srate) + GUARD;
+id1_cap  = ceil(142*scale_max)  + GUARD;
+id2_cap  = ceil(107*scale_max)  + GUARD;
+id3_cap  = ceil(379*scale_max)  + GUARD;
+id4_cap  = ceil(277*scale_max)  + GUARD;
+apL1_cap = ceil(672*scale_max)  + GUARD + 16;
+delL1_cap= ceil(4453*scale_max) + GUARD;
+apL2_cap = ceil(1800*scale_max) + GUARD;
+delL2_cap= ceil(3720*scale_max) + GUARD;
+apR1_cap = ceil(908*scale_max)  + GUARD + 16;
+delR1_cap= ceil(4217*scale_max) + GUARD;
+apR2_cap = ceil(2656*scale_max) + GUARD;
+delR2_cap= ceil(3163*scale_max) + GUARD;
+
+p = 0;
+predelay_base = p; p += predelay_cap;
+id1_base  = p; p += id1_cap;
+id2_base  = p; p += id2_cap;
+id3_base  = p; p += id3_cap;
+id4_base  = p; p += id4_cap;
+apL1_base = p; p += apL1_cap;
+delL1_base= p; p += delL1_cap;
+apL2_base = p; p += apL2_cap;
+delL2_base= p; p += delL2_cap;
+apR1_base = p; p += apR1_cap;
+delR1_base= p; p += delR1_cap;
+apR2_base = p; p += apR2_cap;
+delR2_base= p; p += delR2_cap;
+
+pd_idx=0; id1_idx=0; id2_idx=0; id3_idx=0; id4_idx=0;
+apL1_widx=0; delL1_idx=0; apL2_idx=0; delL2_idx=0;
+apR1_widx=0; delR1_idx=0; apR2_idx=0; delR2_idx=0;
+
+phaseL = 0;
+phaseR = $pi*0.5;
+
+bw_state=0; hp_lp_state=0;
+dampL_state=0; dampR_state=0;
+hcL_state=0; hcR_state=0;
+tankL_out=0; tankR_out=0;
+
+@slider
+
+scale = (srate/29761)*size;
+
+predelay_len = max(1, floor(predelay_ms*0.001*srate));
+id1_len  = max(4, floor(142*scale));
+id2_len  = max(4, floor(107*scale));
+id3_len  = max(4, floor(379*scale));
+id4_len  = max(4, floor(277*scale));
+apL1_len = max(8, floor(672*scale));
+delL1_len= max(8, floor(4453*scale));
+apL2_len = max(8, floor(1800*scale));
+delL2_len= max(8, floor(3720*scale));
+apR1_len = max(8, floor(908*scale));
+delR1_len= max(8, floor(4217*scale));
+apR2_len = max(8, floor(2656*scale));
+delR2_len= max(8, floor(3163*scale));
+
+pd_idx    >= predelay_len ? pd_idx = 0;
+id1_idx   >= id1_len   ? id1_idx = 0;
+id2_idx   >= id2_len   ? id2_idx = 0;
+id3_idx   >= id3_len   ? id3_idx = 0;
+id4_idx   >= id4_len   ? id4_idx = 0;
+apL1_widx >= apL1_len  ? apL1_widx = 0;
+delL1_idx >= delL1_len ? delL1_idx = 0;
+apL2_idx  >= apL2_len  ? apL2_idx = 0;
+delL2_idx >= delL2_len ? delL2_idx = 0;
+apR1_widx >= apR1_len  ? apR1_widx = 0;
+delR1_idx >= delR1_len ? delR1_idx = 0;
+apR2_idx  >= apR2_len  ? apR2_idx = 0;
+delR2_idx >= delR2_len ? delR2_idx = 0;
+
+in1 = diffusion*0.75;
+in2 = diffusion*0.625;
+decay_diff1 = 0.6 + 0.15*diffusion;
+decay_diff2 = 0.4 + 0.15*diffusion;
+
+decay_gain = min(decay, 0.999);
+lp_coef = min(0.9995, damping*0.9995);
+
+mod_depth_samples = mod_depth*8;
+mod_inc = 2*$pi*mod_rate/srate;
+
+bw_coef = exp(-2*$pi*12000/srate);
+hp_coef = exp(-2*$pi*lowcut_hz/srate);
+hc_coef = exp(-2*$pi*highcut_hz/srate);
+
+width_amt = width/100;
+mix_amt = mix/100;
+gain_lin = pow(10, gain_db/20);
+
+@sample
+
+mono_in = (spl0+spl1)*0.5;
+
+// ---- Predelay ----
+pd_out = predelay_base[pd_idx];
+predelay_base[pd_idx] = mono_in;
+pd_idx += 1; pd_idx >= predelay_len ? pd_idx = 0;
+
+// ---- Bandwidth limit ----
+bw_state = bw_state + (1-bw_coef)*(pd_out - bw_state);
+bw_out = bw_state;
+
+// ---- Low cut (subtract-lowpass highpass) ----
+hp_lp_state = hp_lp_state + (1-hp_coef)*(bw_out - hp_lp_state);
+hp_out = bw_out - hp_lp_state;
+
+// ---- Input diffusion: 4-stage series allpass ----
+d = id1_base[id1_idx];
+w = hp_out + in1*d;
+y1 = d - in1*w;
+id1_base[id1_idx] = w;
+id1_idx += 1; id1_idx >= id1_len ? id1_idx = 0;
+
+d = id2_base[id2_idx];
+w = y1 + in1*d;
+y2 = d - in1*w;
+id2_base[id2_idx] = w;
+id2_idx += 1; id2_idx >= id2_len ? id2_idx = 0;
+
+d = id3_base[id3_idx];
+w = y2 + in2*d;
+y3 = d - in2*w;
+id3_base[id3_idx] = w;
+id3_idx += 1; id3_idx >= id3_len ? id3_idx = 0;
+
+d = id4_base[id4_idx];
+w = y3 + in2*d;
+diffused = d - in2*w;
+id4_base[id4_idx] = w;
+id4_idx += 1; id4_idx >= id4_len ? id4_idx = 0;
+
+// ---- Figure-8 injection: each loop gets diffused input + other loop's tail ----
+feedL = diffused + tankR_out;
+feedR = diffused + tankL_out;
+
+// ================= LEFT TANK =================
+phaseL += mod_inc; phaseL >= 2*$pi ? phaseL -= 2*$pi;
+modL = sin(phaseL)*mod_depth_samples;
+readposL = apL1_widx - modL;
+readposL = readposL - floor(readposL/apL1_len)*apL1_len;
+i0 = floor(readposL); fracL = readposL - i0; i1 = i0+1; i1 >= apL1_len ? i1 = 0;
+dL = apL1_base[i0]*(1-fracL) + apL1_base[i1]*fracL;
+wL = feedL + decay_diff1*dL;
+yApL1 = dL - decay_diff1*wL;
+apL1_base[apL1_widx] = wL;
+apL1_widx += 1; apL1_widx >= apL1_len ? apL1_widx = 0;
+
+dL1 = delL1_base[delL1_idx];
+delL1_base[delL1_idx] = yApL1;
+delL1_idx += 1; delL1_idx >= delL1_len ? delL1_idx = 0;
+
+dampL_state = dampL_state + (1-lp_coef)*(dL1 - dampL_state);
+decayedL = dampL_state*decay_gain;
+
+d2L = apL2_base[apL2_idx];
+w2L = decayedL + decay_diff2*d2L;
+yApL2 = d2L - decay_diff2*w2L;
+apL2_base[apL2_idx] = w2L;
+apL2_idx += 1; apL2_idx >= apL2_len ? apL2_idx = 0;
+
+outTapL = delL2_base[delL2_idx];
+delL2_base[delL2_idx] = yApL2;
+delL2_idx += 1; delL2_idx >= delL2_len ? delL2_idx = 0;
+
+// ================= RIGHT TANK =================
+phaseR += mod_inc; phaseR >= 2*$pi ? phaseR -= 2*$pi;
+modR = sin(phaseR)*mod_depth_samples;
+readposR = apR1_widx - modR;
+readposR = readposR - floor(readposR/apR1_len)*apR1_len;
+j0 = floor(readposR); fracR = readposR - j0; j1 = j0+1; j1 >= apR1_len ? j1 = 0;
+dR = apR1_base[j0]*(1-fracR) + apR1_base[j1]*fracR;
+wR = feedR + decay_diff1*dR;
+yApR1 = dR - decay_diff1*wR;
+apR1_base[apR1_widx] = wR;
+apR1_widx += 1; apR1_widx >= apR1_len ? apR1_widx = 0;
+
+dR1 = delR1_base[delR1_idx];
+delR1_base[delR1_idx] = yApR1;
+delR1_idx += 1; delR1_idx >= delR1_len ? delR1_idx = 0;
+
+dampR_state = dampR_state + (1-lp_coef)*(dR1 - dampR_state);
+decayedR = dampR_state*decay_gain;
+
+d2R = apR2_base[apR2_idx];
+w2R = decayedR + decay_diff2*d2R;
+yApR2 = d2R - decay_diff2*w2R;
+apR2_base[apR2_idx] = w2R;
+apR2_idx += 1; apR2_idx >= apR2_len ? apR2_idx = 0;
+
+outTapR = delR2_base[delR2_idx];
+delR2_base[delR2_idx] = yApR2;
+delR2_idx += 1; delR2_idx >= delR2_len ? delR2_idx = 0;
+
+// carry loop outputs forward for next sample's figure-8 feedback
+tankL_out = outTapL;
+tankR_out = outTapR;
+
+// ---- Output tap blend (decorrelated stereo from both loops) ----
+wetL_raw = outTapL*0.7 + outTapR*0.3;
+wetR_raw = outTapR*0.7 + outTapL*0.3;
+
+// ---- High cut on wet signal ----
+hcL_state = hcL_state + (1-hc_coef)*(wetL_raw - hcL_state);
+wetL = hcL_state;
+hcR_state = hcR_state + (1-hc_coef)*(wetR_raw - hcR_state);
+wetR = hcR_state;
+
+// ---- Width (mid/side) ----
+mid = (wetL+wetR)*0.5;
+side = (wetL-wetR)*0.5*width_amt;
+wetL2 = mid+side;
+wetR2 = mid-side;
+
+// ---- Dry/wet mix + output gain ----
+spl0 = (spl0*(1-mix_amt) + wetL2*mix_amt)*gain_lin;
+spl1 = (spl1*(1-mix_amt) + wetR2*mix_amt)*gain_lin;

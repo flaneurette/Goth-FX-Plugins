@@ -1,0 +1,243 @@
+desc:SSL-style Channel Strip (DIY) - EQ + Comp + Glue
+// All-in-one channel strip: 4-band EQ -> feedback-style bus compressor -> console saturation
+// Signal flow: HPF -> LF -> LMF -> HMF -> HF -> LPF -> Compressor -> Saturation
+// Educational/DIY emulation, not an official SSL product.
+
+slider1:hpf_on=0<0,1,1{Off,On}>HPF On
+slider2:hpf_freq=80<20,350,1>HPF Freq (Hz)
+
+slider3:lf_gain=0<-15,15,0.1>LF Gain (dB)
+slider4:lf_freq=60<30,600,1>LF Freq (Hz)
+slider5:lf_bell=0<0,1,1{Shelf,Bell}>LF Shape
+
+slider6:lmf_gain=0<-15,15,0.1>LMF Gain (dB)
+slider7:lmf_freq=600<200,2500,1>LMF Freq (Hz)
+slider8:lmf_q=1<0.4,3,0.01>LMF Q
+
+slider9:hmf_gain=0<-15,15,0.1>HMF Gain (dB)
+slider10:hmf_freq=3000<600,7000,1>HMF Freq (Hz)
+slider11:hmf_q=1<0.4,3,0.01>HMF Q
+
+slider12:hf_gain=0<-15,15,0.1>HF Gain (dB)
+slider13:hf_freq=8000<3000,16000,1>HF Freq (Hz)
+slider14:hf_bell=0<0,1,1{Shelf,Bell}>HF Shape
+
+slider15:lpf_on=0<0,1,1{Off,On}>LPF On
+slider16:lpf_freq=18000<3000,22000,1>LPF Freq (Hz)
+
+slider17:comp_on=1<0,1,1{Off,On}>Comp On
+slider18:thresh=-10<-40,0,0.1>Comp Threshold (dB)
+slider19:ratio=4<1,20,0.1>Comp Ratio (:1)
+slider20:attack=10<0.1,30,0.1>Comp Attack (ms)
+slider21:release=200<10,1200,1>Comp Release (ms)
+slider22:makeup=0<-6,24,0.1>Comp Makeup (dB)
+slider23:comp_mix=100<0,100,1>Comp Mix (%)
+
+slider24:sat_on=1<0,1,1{Off,On}>Saturation On
+slider25:drive=1<0,10,0.01>Saturation Drive
+slider26:asym=0.1<0,1,0.01>Saturation Asymmetry
+slider27:sat_mix=100<0,100,1>Saturation Mix (%)
+
+@init
+
+// ---- EQ state layout: 4 slots per filter per channel ----
+// HPF_L=0 HPF_R=4 LF_L=8 LF_R=12 LMF_L=16 LMF_R=20 HMF_L=24 HMF_R=28 HF_L=32 HF_R=36 LPF_L=40 LPF_R=44
+
+function biquad(base, x, b0, b1, b2, a1, a2) local(x1,x2,y1,y2,y)
+(
+  x1 = state[base];
+  x2 = state[base+1];
+  y1 = state[base+2];
+  y2 = state[base+3];
+  y = b0*x + b1*x1 + b2*x2 - a1*y1 - a2*y2;
+  state[base+1] = x1;
+  state[base] = x;
+  state[base+3] = y1;
+  state[base+2] = y;
+  y;
+);
+
+function calc_passthrough()
+(
+  tb0=1; tb1=0; tb2=0; ta1=0; ta2=0;
+);
+
+function calc_hpf(freq, q) local(w0,cw,sw,alpha)
+(
+  w0 = 2*$pi*freq/srate;
+  cw = cos(w0); sw = sin(w0);
+  alpha = sw/(2*q);
+  tb0 = (1+cw)/2; tb1 = -(1+cw); tb2 = (1+cw)/2;
+  ta0 = 1+alpha; ta1 = -2*cw; ta2 = 1-alpha;
+  tb0/=ta0; tb1/=ta0; tb2/=ta0; ta1/=ta0; ta2/=ta0;
+);
+
+function calc_lpf(freq, q) local(w0,cw,sw,alpha)
+(
+  w0 = 2*$pi*freq/srate;
+  cw = cos(w0); sw = sin(w0);
+  alpha = sw/(2*q);
+  tb0 = (1-cw)/2; tb1 = 1-cw; tb2 = (1-cw)/2;
+  ta0 = 1+alpha; ta1 = -2*cw; ta2 = 1-alpha;
+  tb0/=ta0; tb1/=ta0; tb2/=ta0; ta1/=ta0; ta2/=ta0;
+);
+
+function calc_peaking(freq, q, gainDB) local(w0,cw,sw,alpha,A)
+(
+  A = pow(10, gainDB/40);
+  w0 = 2*$pi*freq/srate;
+  cw = cos(w0); sw = sin(w0);
+  alpha = sw/(2*q);
+  tb0 = 1+alpha*A; tb1 = -2*cw; tb2 = 1-alpha*A;
+  ta0 = 1+alpha/A; ta1 = -2*cw; ta2 = 1-alpha/A;
+  tb0/=ta0; tb1/=ta0; tb2/=ta0; ta1/=ta0; ta2/=ta0;
+);
+
+function calc_lowshelf(freq, gainDB) local(w0,cw,sw,alpha,A,S)
+(
+  S = 1;
+  A = pow(10, gainDB/40);
+  w0 = 2*$pi*freq/srate;
+  cw = cos(w0); sw = sin(w0);
+  alpha = (sw/2)*sqrt((A+1/A)*(1/S-1)+2);
+  tb0 = A*((A+1)-(A-1)*cw+2*sqrt(A)*alpha);
+  tb1 = 2*A*((A-1)-(A+1)*cw);
+  tb2 = A*((A+1)-(A-1)*cw-2*sqrt(A)*alpha);
+  ta0 = (A+1)+(A-1)*cw+2*sqrt(A)*alpha;
+  ta1 = -2*((A-1)+(A+1)*cw);
+  ta2 = (A+1)+(A-1)*cw-2*sqrt(A)*alpha;
+  tb0/=ta0; tb1/=ta0; tb2/=ta0; ta1/=ta0; ta2/=ta0;
+);
+
+function calc_highshelf(freq, gainDB) local(w0,cw,sw,alpha,A,S)
+(
+  S = 1;
+  A = pow(10, gainDB/40);
+  w0 = 2*$pi*freq/srate;
+  cw = cos(w0); sw = sin(w0);
+  alpha = (sw/2)*sqrt((A+1/A)*(1/S-1)+2);
+  tb0 = A*((A+1)+(A-1)*cw+2*sqrt(A)*alpha);
+  tb1 = -2*A*((A-1)+(A+1)*cw);
+  tb2 = A*((A+1)+(A-1)*cw-2*sqrt(A)*alpha);
+  ta0 = (A+1)-(A-1)*cw+2*sqrt(A)*alpha;
+  ta1 = 2*((A-1)-(A+1)*cw);
+  ta2 = (A+1)-(A-1)*cw-2*sqrt(A)*alpha;
+  tb0/=ta0; tb1/=ta0; tb2/=ta0; ta1/=ta0; ta2/=ta0;
+);
+
+// ---- Compressor state ----
+comp_gain = 1;
+compPrevL = 0;
+compPrevR = 0;
+
+// ---- Saturation ----
+// EEL2 has no built-in tanh(), so implement it via exp() (which is built-in).
+function eel_tanh(x) local(e2x)
+(
+  x > 20 ? 1 : x < -20 ? -1 : (
+    e2x = exp(2*x);
+    (e2x - 1)/(e2x + 1);
+  );
+);
+
+function shape(x) local(d,y)
+(
+  d = x + asym*x*x*0.5;
+  y = eel_tanh(d*drive)*sat_norm;
+  y;
+);
+
+@slider
+
+hpf_on == 1 ? calc_hpf(hpf_freq, 0.707) : calc_passthrough();
+hpf_b0=tb0; hpf_b1=tb1; hpf_b2=tb2; hpf_a1=ta1; hpf_a2=ta2;
+
+lf_bell == 1 ? calc_peaking(lf_freq, 0.9, lf_gain) : calc_lowshelf(lf_freq, lf_gain);
+lf_b0=tb0; lf_b1=tb1; lf_b2=tb2; lf_a1=ta1; lf_a2=ta2;
+
+calc_peaking(lmf_freq, lmf_q, lmf_gain);
+lmf_b0=tb0; lmf_b1=tb1; lmf_b2=tb2; lmf_a1=ta1; lmf_a2=ta2;
+
+calc_peaking(hmf_freq, hmf_q, hmf_gain);
+hmf_b0=tb0; hmf_b1=tb1; hmf_b2=tb2; hmf_a1=ta1; hmf_a2=ta2;
+
+hf_bell == 1 ? calc_peaking(hf_freq, 0.9, hf_gain) : calc_highshelf(hf_freq, hf_gain);
+hf_b0=tb0; hf_b1=tb1; hf_b2=tb2; hf_a1=ta1; hf_a2=ta2;
+
+lpf_on == 1 ? calc_lpf(lpf_freq, 0.707) : calc_passthrough();
+lpf_b0=tb0; lpf_b1=tb1; lpf_b2=tb2; lpf_a1=ta1; lpf_a2=ta2;
+
+attack_coef = exp(-1/(0.001*attack*srate));
+release_coef = exp(-1/(0.001*release*srate));
+comp_makeup_lin = pow(10, makeup/20);
+
+sat_norm = drive > 0 ? 1/eel_tanh(drive) : 1;
+sat_out_lin = 1; // headroom trim kept at unity; adjust here if needed
+
+@sample
+
+sL = spl0; sR = spl1;
+
+// ---- EQ ----
+sL = biquad(0,  sL, hpf_b0, hpf_b1, hpf_b2, hpf_a1, hpf_a2);
+sR = biquad(4,  sR, hpf_b0, hpf_b1, hpf_b2, hpf_a1, hpf_a2);
+
+sL = biquad(8,  sL, lf_b0, lf_b1, lf_b2, lf_a1, lf_a2);
+sR = biquad(12, sR, lf_b0, lf_b1, lf_b2, lf_a1, lf_a2);
+
+sL = biquad(16, sL, lmf_b0, lmf_b1, lmf_b2, lmf_a1, lmf_a2);
+sR = biquad(20, sR, lmf_b0, lmf_b1, lmf_b2, lmf_a1, lmf_a2);
+
+sL = biquad(24, sL, hmf_b0, hmf_b1, hmf_b2, hmf_a1, hmf_a2);
+sR = biquad(28, sR, hmf_b0, hmf_b1, hmf_b2, hmf_a1, hmf_a2);
+
+sL = biquad(32, sL, hf_b0, hf_b1, hf_b2, hf_a1, hf_a2);
+sR = biquad(36, sR, hf_b0, hf_b1, hf_b2, hf_a1, hf_a2);
+
+sL = biquad(40, sL, lpf_b0, lpf_b1, lpf_b2, lpf_a1, lpf_a2);
+sR = biquad(44, sR, lpf_b0, lpf_b1, lpf_b2, lpf_a1, lpf_a2);
+
+// ---- Compressor (feedback-style detector) ----
+comp_on == 1 ? (
+  lvl = abs(compPrevL);
+  abs(compPrevR) > lvl ? lvl = abs(compPrevR);
+  lvl < 0.0000001 ? lvl = 0.0000001;
+
+  lvl_db = 20*log10(lvl);
+  over = lvl_db - thresh;
+  over < 0 ? over = 0;
+
+  gr_db = over*(1-1/ratio);
+  target_gain = pow(10, -gr_db/20);
+
+  target_gain < comp_gain ? coef = attack_coef : coef = release_coef;
+  comp_gain = target_gain + (comp_gain - target_gain)*coef;
+
+  compL = sL*comp_gain;
+  compR = sR*comp_gain;
+
+  compPrevL = compL;
+  compPrevR = compR;
+
+  outL = compL*comp_makeup_lin;
+  outR = compR*comp_makeup_lin;
+
+  cwet = comp_mix/100;
+  sL = sL*(1-cwet) + outL*cwet;
+  sR = sR*(1-cwet) + outR*cwet;
+
+  gr_meter = gr_db;
+);
+
+// ---- Saturation ----
+sat_on == 1 ? (
+  wetL = shape(sL)*sat_out_lin;
+  wetR = shape(sR)*sat_out_lin;
+
+  swet = sat_mix/100;
+  sL = sL*(1-swet) + wetL*swet;
+  sR = sR*(1-swet) + wetR*swet;
+);
+
+spl0 = sL;
+spl1 = sR;
