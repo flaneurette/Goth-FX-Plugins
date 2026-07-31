@@ -1,4 +1,4 @@
-desc:Plate Reverb (Dattorro-style)
+desc: Goth FX Plate Reverb
 // A lush plate reverb built on the classic Dattorro (1997) "figure-8" tank
 // topology: bandwidth-limited mono input -> 4-stage allpass diffuser ->
 // two cross-feeding decay loops (modulated allpass -> long delay -> damping
