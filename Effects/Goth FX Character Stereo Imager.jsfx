@@ -1,4 +1,4 @@
-//Character Stereo Field with Low-Pass Filter and Reverb
+desc: Goth FX Character Stereo Field
 
 slider1:100<0,200,1>Width (%)
 slider2:120<20,500,1>Bass Safety Freq (Hz)
