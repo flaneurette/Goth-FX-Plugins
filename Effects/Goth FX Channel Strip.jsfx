@@ -1,4 +1,4 @@
-desc:SSL-style Channel Strip (DIY) - EQ + Comp + Glue
+desc: Goth FX SSL-style Channel Strip (DIY) - EQ + Comp + Glue
 // All-in-one channel strip: 4-band EQ -> feedback-style bus compressor -> console saturation
 // Signal flow: HPF -> LF -> LMF -> HMF -> HF -> LPF -> Compressor -> Saturation
 // Educational/DIY emulation, not an official SSL product.
